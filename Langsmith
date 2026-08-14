@@ -1,0 +1,27 @@
+systeam :
+    latency issue, cost increases, hallucination issue
+
+Observability :-  in LangGraph means monitoring and tracking what is happening inside your LangGraph agent while it runs.
+               seeing and understanding the execution of your LangGraph application.Which nodes executed
+
+                1. What inputs and outputs each node had
+                2. all intermediate state
+                3. latency tracking
+                4. token usage / cost
+                5. error
+                6. How the state changed
+                7.
+
+                Which LLM/tool was called
+                How long each step took
+                Errors and failures
+                Token usage and costs
+
+LangSmith :- is a platform for developing, debugging, testing, monitoring, and evaluating LLM and agent applications built with
+frameworks like LangChain and LangGraph.
+
+
+
+
+
+

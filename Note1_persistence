@@ -1,0 +1,85 @@
+
+if we have an goal :
+Concept of Grapg :-
+    we divide that goal into smaller task , and then treat this task as node, then bind that task using edges
+    that ditermine the flow of execution
+
+CConcept of state :-
+    when ever you build graph or workflow in langgraph , you hvae to build the state of the graph before building it
+    becasue , node need data for execution , so this type of imp data is store in the state.
+    state is dictionary
+    so each and every node in the graph can acces the value in the  state. aloing with this node can modifies the value
+    inside the state also.
+    by using this we can build more complex workflow using
+
+Note :
+    once you execute some graph , it contain the value from some, state, if the graph end then that value which are store
+    in the state get deleted. no longer available.
+    this is the core behaviour of langgrpah, by using Persistence you can change this
+
+  Persistence:-  in LangGraph means saving the information or state of a workflow so that it is not lost when
+  the workflow stops, pauses, or the application restarts. LangGraph saves the current state as a checkpoint,
+  which is basically a saved snapshot of the workflow at a particular point. Later, LangGraph can load that
+  checkpoint and continue the workflow from where it stopped instead of starting from the beginning.
+  Persistence is especially useful for chat applications, long-running workflows, human approval workflows,
+  and failure recovery. In simple terms, persistence is like a save feature in a game—it saves the progress
+  of your LangGraph workflow so you can continue it later.
+
+  Persistence not only save the end state but it also saved the middle/intermediate values of state.
+  if workflow get crashed, as intermediate state are saved , instead of staring the workflow from start start it from where it stops
+  also called as folt tolerance
+
+  in cahtbot :-
+    if you wanted to resume  old conversation, with the chatbot , in that case we can, use persistance, store the
+    state in DB and resume this.
+
+
+    Checkpointer :- Persistence is added with the help of checkpointers
+        Divided the execution of graph into checkpoints, on each checkpoints, it saves the value of the current state
+        at each level of the graph it adss the checkpointer and save the current state.
+
+
+    Threads in Persisteance:-
+        A thread in LangGraph is a unique identifier used to maintain and retrieve the state of a particular conversation or workflow.
+
+
+    if we want, to get the value of the state , in that case we use workflow.get_state()
+    if we want intr mediate value in that case we use workflow.get_state_histroy()
+
+
+    Benifits:-
+        1. short term memory
+        2. fault tolerance
+        3. can implement Human in the loop
+        4. time travel
+
+
+1. streaming :-
+    Streaming just means showing the answer piece by piece as it's being written, instead of waiting for the whole thing to finish and then dumping it all at once.
+
+Think of it like a text message versus a letter. Without streaming, it's like waiting for someone to write an entire letter, seal it, and mail it — you sit there staring at nothing for 20 seconds, then the full reply appears in one go. With streaming, it's like watching someone type in a chat app: you see the words appear one at a time, live, as they think of them. The total time is basically the same, but it feels much faster because you see progress immediately and can start reading right away.
+
+Here's the important part about why it's even possible: a language model doesn't write the whole answer in one shot. It generates the reply one small piece at a time — roughly word by word (these pieces are called "tokens"). So the model is already producing the answer gradually on the inside. The only question is whether your code waits for all the pieces to pile up before showing them, or shows each piece the moment it arrives.
+
+That's the difference between the two methods in your code:
+
+chatbot.invoke(...) means "run the whole thing and give me the finished answer." It quietly collects every token behind the scenes and hands you the complete text at the end. You wait, then everything appears at once.
+
+chatbot.stream(..., stream_mode="messages") means "give me each token as it comes." Instead of one final result, it hands you a steady drip of little chunks, and you display each one as it arrives.
+
+In your app, three things make streaming happen:
+
+The generator function stream_reply loops over chatbot.stream(...). Each turn of the loop gives it one small chunk of text, and it yields that chunk out. yield is Python's way of saying "here's the next piece, keep them coming" instead of "here's the one final answer."
+
+stream_mode="messages" tells LangGraph specifically which kind of streaming you want — the actual words the model is typing. (Other modes stream different things, like internal state, which isn't what you want here.)
+
+st.write_stream(stream_reply(...)) is the Streamlit side. It takes that drip of chunks and paints each one onto the screen the instant it arrives, so the user watches the answer type itself out. As a bonus, when it's done it also hands you back the complete text as one string, which is why you can still save the full message to your chat history.
+
+So in one sentence: the model was always producing the answer bit by bit anyway; streaming is just choosing to show each bit right away with stream() and st.write_stream(), instead of hiding them all until the end with invoke().
+
+Resume chatting : resume the chat from  where you stop, added the persitance in the, in the data base
+
+
+
+
+integratting the chat to Data base , my sql,

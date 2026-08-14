@@ -1,0 +1,42 @@
+Create a virtual env, activate this and then install all therequiremnets in that.
+
+
+Need to install ollama pull qwen3:8b for this as the model is used this model.
+steps to install this model is as followes :
+    1. download the ollma form https://ollama.com/download/windows install this
+    close the pycahrma and then open again and then run the command ollama --version
+
+    pull the model :bu using this command (  ollama pull qwen3:8b   )
+    Test this using ollama run qwen3:8b  ---> What is LangGraph?
+
+
+2. pip install ollama
+3. install python package langgraph , and langchain_ollama
+
+------------------------------------------------------------------
+
+12-08-2026
+ollama pull qwen3:4b   enter this command
+
+
+
+
+(chek what is git init)
+
+---------git
+git add .
+git commit -m "Add thinking spinner, disable input during generation, disable qwen3 reasoning"
+git push
+
+
+to tun the ui
+streamlit run streamlit_frontend.py
+
+
+to DO.
+1. pip install langgraph-checkpoint-sqlite
+pip install -U --force-reinstall --no-cache-dir "langchain-core>=1.5" "langchain-ollama>=1.1" "langgraph>=1.2" langgraph-checkpoint-sqlitepip show langchain-core
+
+
+
+run this command - pip install langgraph-checkpoint-postgres "psycopg[binary]" psycopg-pool
