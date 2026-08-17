@@ -20,8 +20,15 @@ Observability :-  in LangGraph means monitoring and tracking what is happening i
 LangSmith :- is a platform for developing, debugging, testing, monitoring, and evaluating LLM and agent applications built with
 frameworks like LangChain and LangGraph.
 
+features of observability :
+    1. monitoring and alerting.( if latency is grater then threeshould then alert).
+    2. maintaince :-
+    3. Observability:- observing a sinple trace is called observability
+    4. Evalution
+    5. prompt experimentation
 
 
-
+in over chcatbot, we have connected langgraph with lang smiht, the problem is , whenever we are , chatting on different chat the
+observability is showing int he same, thread in langsmith, but diffeent chat should have different langsmith thread.
 
 
