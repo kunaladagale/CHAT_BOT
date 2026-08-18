@@ -77,3 +77,5 @@ xxhash==3.5.0
 zstandard==0.23.0
 # Chatbot project dependencies (verified compatible set — all 0.3.x-era)
 langchain-ollama==0.3.6
+
+#pip install yfinance requests langsmith

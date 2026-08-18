@@ -1,16 +1,3 @@
-weather tool,
-you tube chatbot
-stock price
-news
-
-
-1. tool node
-2. tools conditon
-3. custom tool and pre-build tool
-4. @tool decorator
-5.
-
-
 # Tools Reference
 
 Complete capability documentation for the three tools in `tools.py`.

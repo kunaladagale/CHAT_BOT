@@ -40,3 +40,8 @@ pip install -U --force-reinstall --no-cache-dir "langchain-core>=1.5" "langchain
 
 
 run this command - pip install langgraph-checkpoint-postgres "psycopg[binary]" psycopg-pool
+
+
+
+
+pip install yfinance requests langsmith
