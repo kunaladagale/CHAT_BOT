@@ -41,6 +41,30 @@ import re
 
 import requests
 from langchain_core.tools import tool
+import os
+import smtplib
+from email.message import EmailMessage
+from langgraph.types import interrupt   # the human-in-the-loop primitive
+
+
+# Youtube
+@tool
+def add_youtube_video(url: str) -> str:
+    """Load a YouTube video's transcript so its content can be searched and
+    questioned. Call this whenever the user provides a YouTube link/URL.
+
+    Args:
+        url: A YouTube URL (youtube.com/watch?v=..., youtu.be/..., shorts, etc.).
+
+    Returns:
+        A confirmation that the transcript was loaded, or an error message.
+    """
+    return RAG.ingest_youtube(url)
+
+
+
+
+
 
 # --- LangSmith @traceable, with a no-op fallback ---------------------------
 # If langsmith isn't installed (or tracing is off) the app must still run.
@@ -55,6 +79,30 @@ except ImportError:  # pragma: no cover
 
 
 HTTP_TIMEOUT = 15  # seconds -- never let a dead API hang the whole chat
+
+#RAG:-
+from rag import RAG   # add with the other imports at the top
+@tool
+def search_documents(query: str, source: str = "") -> str:
+    """Search the user's UPLOADED documents and return relevant passages with citations.
+
+    Use this ONLY when the user's question is about the content of documents they
+    have uploaded (their file, PDF, report, contract, notes, etc.). For general
+    knowledge questions, do NOT use this tool — answer normally.
+
+    Args:
+        query: What to look up in the uploaded documents.
+        source: Optional exact filename to restrict the search to one document.
+
+    Returns:
+        Relevant passages tagged with [S#] citations, or a note if nothing
+        relevant is found or no documents have been uploaded.
+    """
+    return RAG.search(query, source or None)
+
+
+
+
 
 
 # ===========================================================================
@@ -551,17 +599,104 @@ def get_stock_price(symbol: str) -> str:
 
 
 # ===========================================================================
+# 4. SEND EMAIL  (human-in-the-loop: pauses for approval before sending)
+# ===========================================================================
+
+@traceable(run_type="tool", name="smtp_send")
+def _smtp_send(to: str, subject: str, body: str) -> str:
+    """Actually deliver the email via SMTP (own LangSmith span).
+    Reads credentials from .env. If they're missing it SIMULATES the send so
+    you can test the whole approval flow without configuring SMTP."""
+    host = os.getenv("SMTP_HOST")
+    user = os.getenv("SMTP_USER")
+    pwd  = os.getenv("SMTP_PASSWORD")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    sender = os.getenv("SMTP_FROM", user or "")
+
+    if not (host and user and pwd):
+        return (f"[SIMULATED SEND] No SMTP_* credentials in .env, so nothing was "
+                f"actually emailed. Would have sent to {to} | subject: {subject!r}.")
+    try:
+        msg = EmailMessage()
+        msg["From"] = sender
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.set_content(body)
+        with smtplib.SMTP(host, port, timeout=20) as smtp:
+            smtp.starttls()
+            smtp.login(user, pwd)
+            smtp.send_message(msg)
+        return f"Email successfully sent to {to}."
+    except Exception as exc:  # noqa: BLE001 -- tools must never raise
+        return f"Error: could not send the email -- {exc}"
+
+
+@tool
+def send_email(to: str, subject: str, body: str) -> str:
+    """Send an email to a recipient.
+
+    IMPORTANT: this does NOT send immediately. It PAUSES and shows the drafted
+    email to the human, who must approve it before it is delivered. Use this
+    whenever the user asks to send, write, or email someone.
+
+    Args:
+        to: Recipient email address, e.g. "someone@example.com".
+        subject: Short subject line.
+        body: The full email body in plain text.
+
+    Returns:
+        Confirmation the email was sent, or a note that it was rejected/failed.
+    """
+    # --- HUMAN IN THE LOOP -------------------------------------------------
+    # interrupt() pauses the ENTIRE graph here and hands this draft to the UI.
+    # Execution resumes only when the app calls Command(resume=<decision>).
+    decision = interrupt({
+        "type": "email_approval",
+        "to": to,
+        "subject": subject,
+        "body": body,
+    })
+
+    # `decision` is whatever the app passed to Command(resume=...). We accept an
+    # edited draft too, so the user can tweak the email before approving.
+    if isinstance(decision, dict):
+        action = decision.get("action", "reject")
+        to = decision.get("to", to)
+        subject = decision.get("subject", subject)
+        body = decision.get("body", body)
+        feedback = decision.get("feedback", "")
+    else:
+        action = str(decision)
+        feedback = ""
+
+    if action == "approve":
+        return _smtp_send(to, subject, body)
+
+    if action == "revise":
+        return (
+            "The user did NOT approve the email. They requested these changes:\n"
+            f"{feedback}\n\n"
+            "Rewrite the email applying this feedback, then call send_email again "
+            "with the improved subject and body. Write the body as clean, "
+            "well-formatted PLAIN TEXT (short paragraphs, simple '-' bullets). "
+            "Do NOT use HTML tags unless the user explicitly asked for HTML."
+        )
+
+    return "The email was NOT sent — the user rejected the draft."
+
+# ===========================================================================
 # The registry the graph imports. Add a new @tool above, list it here, done.
 # ===========================================================================
-TOOLS = [calculator, get_weather, get_stock_price]
+TOOLS = [calculator, get_weather, get_stock_price, search_documents, add_youtube_video]
 
-# Handy for the UI: tool name -> emoji/label shown in the Streamlit status box.
 TOOL_LABELS = {
     "calculator": "🧮 Calculator",
     "get_weather": "🌤️ Weather",
     "get_stock_price": "📈 Stock price",
+    "send_email": "✉️ Send email",
+    "search_documents": "📄 Document search",
+    "add_youtube_video": "▶️ YouTube transcript",
 }
-
 
 if __name__ == "__main__":
     # quick smoke test:  python tools.py

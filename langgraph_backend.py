@@ -1,172 +1,243 @@
 """
 langgraph_backend.py
 ====================
-The agent graph.
+Agent graph, now with the email tool coming from an MCP SERVER instead of a
+local @tool.
 
-    START ──► chat_node ──(tools_condition)──► tools ──┐
-                  │                                     │
-                  │ no tool calls                       │  result fed back
-                  ▼                                     │
-                 END  ◄───────────────────────────────  ┘
+    START ─► chat_node ─┬─(email tool call)──► review_email ─(approve)─► tools ─► chat_node
+                        │                            └─(reject/revise)──────────► chat_node
+                        ├─(other tool call)───────────────────────► tools ─► chat_node
+                        └─(no tool call)───────────────────────────────────► END
 
-chat_node asks the LLM. The LLM either answers in plain text (-> END) or emits
-one or more tool_calls (-> tools). The ToolNode runs them, appends a ToolMessage
-for each, and loops back into chat_node so the model can read the results and
-either call more tools or write the final answer. That loop is the whole
-difference between a chatbot and an agent.
+Local tools (calculator, weather, stock) still live in tools.py.
+The email tool is loaded from mcp_email_server.py over MCP.
+
+Human-in-the-loop: because the email tool now runs in a SEPARATE process, the
+approval pause can't live inside it. Instead, `review_email` is a node in THIS
+graph that interrupt()s for approval BEFORE the email tool is allowed to run.
 """
 
 from dotenv import load_dotenv
 load_dotenv()
 
+import sys
 import sqlite3
+import asyncio
+import threading
+from pathlib import Path
 from typing import TypedDict, Annotated
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage, AIMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
+from langgraph.types import interrupt, Command
 
-from chat_db import DB_PATH, init_chats_table   # share the same SQLite file
-from tools import TOOLS                          # <-- all tools live in tools.py
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
-# --- LangSmith @traceable, with a no-op fallback ---------------------------
-try:
-    from langsmith import traceable
-except ImportError:  # pragma: no cover
-    def traceable(*d_args, **d_kwargs):          # type: ignore[misc]
-        if len(d_args) == 1 and callable(d_args[0]) and not d_kwargs:
-            return d_args[0]
-        return lambda fn: fn
+from chat_db import DB_PATH, init_chats_table
+from tools import TOOLS as LOCAL_TOOLS          # calculator, weather, stock, RAG (local)
+from rag import RAG                             # to make the prompt document-aware
+
+EMAIL_TOOL_NAME = "send_email"
 
 
 # ===========================================================================
-# State
+# 1. Load the email tool from the MCP server
+# ===========================================================================
+# We launch mcp_email_server.py as a subprocess and talk to it over stdio.
+# get_tools() is async, so we run it once here at import with asyncio.run().
+_server_path = str(Path(__file__).parent / "mcp_email_server.py")
+
+mcp_client = MultiServerMCPClient({
+    "email": {
+        "command": sys.executable,      # same Python/venv we're running in
+        "args": [_server_path],
+        "transport": "stdio",
+    }
+})
+
+_RAW_MCP_TOOLS = asyncio.run(mcp_client.get_tools())   # async-only tools
+
+# --- make the async MCP tools callable SYNCHRONOUSLY ----------------------
+# Streamlit runs the graph with the sync chatbot.stream(), but MCP tools are
+# async-only ("StructuredTool does not support sync invocation"). We run a
+# private event loop in a background thread and bridge each call to it.
+_bg_loop = asyncio.new_event_loop()
+threading.Thread(target=_bg_loop.run_forever, daemon=True).start()
+
+
+def _wrap_sync(async_tool):
+    """Return a copy of an async MCP tool that ALSO works when called sync."""
+    async def _acall(**kwargs):
+        return await async_tool.ainvoke(kwargs)
+
+    def _scall(**kwargs):
+        fut = asyncio.run_coroutine_threadsafe(_acall(**kwargs), _bg_loop)
+        return fut.result()
+
+    return StructuredTool.from_function(
+        func=_scall,               # sync path (what ToolNode uses here)
+        coroutine=_acall,          # async path (kept for completeness)
+        name=async_tool.name,
+        description=async_tool.description,
+        args_schema=async_tool.args_schema,
+    )
+
+
+MCP_TOOLS = [_wrap_sync(t) for t in _RAW_MCP_TOOLS]
+
+# everything the model can call = local tools + MCP tools
+ALL_TOOLS = list(LOCAL_TOOLS) + list(MCP_TOOLS)
+
+
+# ===========================================================================
+# 2. State + model
 # ===========================================================================
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-# ===========================================================================
-# Model + tool binding
-# ===========================================================================
-# bind_tools() is the line that makes the model tool-aware: it sends the JSON
-# schema of every tool (built from the type hints + docstrings in tools.py)
-# along with each request, so the model can reply with tool_calls instead of
-# text. Without it the graph would loop forever doing nothing.
-#
-# NOTE: the model must actually support tool calling. qwen3 does. If you swap
-# to a model that doesn't (e.g. plain llama2), tool_calls will always be empty.
 llm = ChatOllama(
     model="qwen3:8b",
-    reasoning=False,      # clean, direct answers (no thinking monologue)
-    keep_alive="30m",     # keep the model warm for fast replies
-    temperature=0,        # deterministic tool-argument extraction
+    reasoning=False,
+    keep_alive="30m",
+    temperature=0,
 )
+llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
-llm_with_tools = llm.bind_tools(TOOLS)
 
-
-SYSTEM_PROMPT = SystemMessage(content=(
-    "You are a helpful assistant with access to tools.\n"
-    "\n"
-    "Rules:\n"
-    "- For ANY arithmetic, use the `calculator` tool. Never do mental math.\n"
-    "- For ANY weather question, use `get_weather`. Never answer from memory.\n"
-    "- For ANY share price, index level or crypto price, use `get_stock_price`. "
-    "Never answer from memory.\n"
-    "- You may call several tools in a row: read each result, then decide "
-    "whether you need another tool or are ready to answer.\n"
-    "- If a tool returns a line starting with 'Error:', do not invent the "
-    "answer. Either retry with corrected arguments (e.g. a different ticker "
-    "suffix) or tell the user plainly what went wrong.\n"
-    "- Once you have what you need, reply in clear natural language and state "
-    "the units and the as-of time for any live data."
-))
+def build_system_prompt() -> SystemMessage:
+    """Built fresh each turn so it can tell the model which documents are
+    currently uploaded — this is what makes the agent actually call the RAG
+    tool instead of answering from memory."""
+    text = (
+        "You are a helpful assistant with access to tools.\n"
+        "- For arithmetic use `calculator`. For weather use `get_weather`. "
+        "For any price use `get_stock_price`. For sending email use `send_email`.\n"
+        "- When drafting an email body, write clean PLAIN TEXT — short paragraphs "
+        "and simple '-' bullets. Never use HTML unless explicitly asked.\n"
+        "- If the user's message contains a YouTube link/URL, FIRST call "
+        "`add_youtube_video` with that URL to load its transcript, then answer "
+        "their question using `search_documents`.\n"
+    )
+    if RAG.has_documents:
+        text += (
+            "\nIMPORTANT — the user has UPLOADED these documents: "
+            + ", ".join(RAG.sources()) + ".\n"
+            "For ANY question that could relate to their content (people, terms, "
+            "products, facts named in them), you MUST call `search_documents` "
+            "FIRST and answer from its results, citing the [S#] tags. Do NOT answer "
+            "from your own knowledge and do NOT say a term is unknown before you "
+            "have searched the documents.\n"
+        )
+    else:
+        text += "- No documents are uploaded; do not use `search_documents`.\n"
+    text += "Once you have what you need, reply in clear natural language."
+    return SystemMessage(content=text)
 
 
 # ===========================================================================
-# Nodes
+# 3. Nodes
 # ===========================================================================
-@traceable(run_type="chain", name="chat_node_reasoning")
-def _decide(messages):
-    """The actual LLM call, as its own named LangSmith span.
-
-    Kept separate from the node function because @traceable injects a
-    `config=None` kwarg into the signature it exposes, and LangGraph inspects
-    node signatures to decide what to pass in. Wrapping the body instead of the
-    node keeps both happy.
-    """
-    return llm_with_tools.invoke([SYSTEM_PROMPT] + list(messages))
-
-
 def chat_node(state: ChatState):
-    """Ask the LLM. It returns either a normal answer or a set of tool_calls.
-
-    The system prompt is prepended at call time rather than stored in state,
-    so it never gets checkpointed and duplicated on every turn.
-    """
-    response = _decide(state["messages"])
+    response = llm_with_tools.invoke([build_system_prompt()] + list(state["messages"]))
     return {"messages": [response]}
 
 
-# ToolNode is the prebuilt executor: it reads the tool_calls off the last
-# AIMessage, runs each matching function from TOOLS, and appends one
-# ToolMessage per call (carrying the result and the tool_call_id).
-# handle_tool_errors=True means an exception becomes a readable ToolMessage
-# instead of crashing the graph -- a second safety net on top of the
-# try/except blocks inside tools.py.
-tool_node = ToolNode(TOOLS, handle_tool_errors=True)
+def review_email(state: ChatState):
+    """HUMAN-IN-THE-LOOP gate. Runs when the model wants to send an email.
+    Pauses for approval, then routes based on the human's decision."""
+    last = state["messages"][-1]                      # AIMessage with tool_calls
+    email_call = next(tc for tc in last.tool_calls if tc["name"] == EMAIL_TOOL_NAME)
+    args = email_call.get("args", {})
+
+    # PAUSE — hand the draft to the UI (same payload shape the frontend expects)
+    decision = interrupt({
+        "type": "email_approval",
+        "to": args.get("to", ""),
+        "subject": args.get("subject", ""),
+        "body": args.get("body", ""),
+    })
+    if not isinstance(decision, dict):
+        decision = {"action": str(decision)}
+    action = decision.get("action", "reject")
+
+    if action == "approve":
+        # apply any edits the user made in the UI, then let the tool run
+        new_calls = []
+        for c in last.tool_calls:
+            if c["id"] == email_call["id"]:
+                c = {**c, "args": {
+                    "to": decision.get("to", args.get("to")),
+                    "subject": decision.get("subject", args.get("subject")),
+                    "body": decision.get("body", args.get("body")),
+                }}
+            new_calls.append(c)
+        edited = AIMessage(content=last.content, tool_calls=new_calls, id=last.id)
+        return Command(goto="tools", update={"messages": [edited]})
+
+    if action == "revise":
+        note = ToolMessage(
+            content=("The user did NOT approve. Requested changes: "
+                     + decision.get("feedback", "")
+                     + " Rewrite the email as clean plain text and call send_email again."),
+            tool_call_id=email_call["id"],
+        )
+        return Command(goto="chat_node", update={"messages": [note]})
+
+    # reject
+    note = ToolMessage(
+        content="The user rejected the email. It was NOT sent.",
+        tool_call_id=email_call["id"],
+    )
+    return Command(goto="chat_node", update={"messages": [note]})
+
+
+tool_node = ToolNode(ALL_TOOLS, handle_tool_errors=True)
+
+
+def route_after_chat(state: ChatState):
+    """Decide where to go after the model speaks."""
+    last = state["messages"][-1]
+    tool_calls = getattr(last, "tool_calls", None)
+    if not tool_calls:
+        return END
+    names = [tc["name"] for tc in tool_calls]
+    if EMAIL_TOOL_NAME in names:      # email needs approval first
+        return "review_email"
+    return "tools"                    # other tools run directly
 
 
 # ===========================================================================
-# Persistence
+# 4. Persistence
 # ===========================================================================
-# PERSISTENT memory in a local SQLite file (no server, no password).
-# SqliteSaver saves every turn keyed by thread_id and, on the next run,
-# feeds the whole history back to the LLM automatically.
 _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 checkpointer = SqliteSaver(_conn)
-checkpointer.setup()          # creates checkpoint tables the first time (idempotent)
-init_chats_table()            # creates our chat-metadata table the first time
+checkpointer.setup()
+init_chats_table()
 
 
 # ===========================================================================
-# Graph wiring
+# 5. Graph wiring
 # ===========================================================================
 graph = StateGraph(ChatState)
-
 graph.add_node("chat_node", chat_node)
+graph.add_node("review_email", review_email)
 graph.add_node("tools", tool_node)
 
 graph.add_edge(START, "chat_node")
-
-# tools_condition inspects the last message:
-#   has .tool_calls  -> returns "tools"
-#   otherwise        -> returns END
 graph.add_conditional_edges(
     "chat_node",
-    tools_condition,
-    {"tools": "tools", END: END},
+    route_after_chat,
+    {"review_email": "review_email", "tools": "tools", END: END},
 )
-
-# after the tools run, ALWAYS go back to the LLM with the results -> the loop
 graph.add_edge("tools", "chat_node")
+# review_email routes itself with Command(goto=...), so no static edge needed.
 
 chatbot = graph.compile(checkpointer=checkpointer)
 
-
-# ===========================================================================
-# Handy for the UI / debugging
-# ===========================================================================
-TOOL_NAMES = [t.name for t in TOOLS]
-
-if __name__ == "__main__":
-    # Print the graph so you can eyeball the wiring:  python langgraph_backend.py
-    try:
-        print(chatbot.get_graph().draw_ascii())
-    except Exception:  # noqa: BLE001 -- draw_ascii needs the `grandalf` package
-        print("Nodes:", list(chatbot.get_graph().nodes))
-        print("Tools:", TOOL_NAMES)
+TOOL_NAMES = [t.name for t in ALL_TOOLS]

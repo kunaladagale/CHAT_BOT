@@ -79,3 +79,7 @@ zstandard==0.23.0
 langchain-ollama==0.3.6
 
 #pip install yfinance requests langsmith
+#pip install mcp langchain-mcp-adapters
+#pip install langchain-chroma chromadb rank-bm25 flashrank pypdf docx2txt langchain-community
+#ollama pull nomic-embed-text
+#pip install youtube-transcript-api
