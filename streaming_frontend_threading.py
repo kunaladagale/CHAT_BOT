@@ -17,6 +17,7 @@ from langgraph_backend import chatbot
 import chat_db as db          # SQLite metadata layer (create/list/rename/delete chats)
 from tools import TOOL_LABELS  # {tool_name: "🧮 Calculator", ...} for the status line
 from rag import RAG            # document index for the Agentic RAG tool
+import media                   # hand-off for text-to-speech audio
 
 print("[LangSmith] tracing:", os.getenv("LANGCHAIN_TRACING_V2"),
       "| project:", os.getenv("LANGCHAIN_PROJECT"))
@@ -238,6 +239,14 @@ for message in st.session_state['message_history']:
     with st.chat_message(message['role']):
         st.markdown(message['content'])
 
+# audio produced by the text_to_speech tool (persists until the next one)
+_audio = st.session_state.get('audio_path')
+if _audio and os.path.exists(_audio):
+    st.audio(_audio)
+    with open(_audio, 'rb') as _f:
+        st.download_button('⬇️ Download audio', _f,
+                           file_name=os.path.basename(_audio), mime='audio/mpeg')
+
 # ---- HUMAN-IN-THE-LOOP: email approval gate -------------------------------
 # If the graph paused asking to send an email, show the draft for approval
 # instead of the normal input.
@@ -344,6 +353,11 @@ if st.session_state['generating']:
             st.markdown(ai_message)
 
     wait_for_all_tracers()
+
+    # if the text_to_speech tool produced audio this turn, show it
+    _ap = media.pop_last_audio()
+    if _ap:
+        st.session_state['audio_path'] = _ap
 
     # did the graph pause asking to send an email?
     pending = get_pending_interrupt()

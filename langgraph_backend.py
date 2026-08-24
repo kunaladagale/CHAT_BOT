@@ -123,6 +123,10 @@ def build_system_prompt() -> SystemMessage:
         "- If the user's message contains a YouTube link/URL, FIRST call "
         "`add_youtube_video` with that URL to load its transcript, then answer "
         "their question using `search_documents`.\n"
+        "- If the user asks for the answer as audio/voice or to listen/hear it, "
+        "first compose your answer, then call `text_to_speech` with that answer.\n"
+        "- For current news or latest events, use `get_news` and summarize the "
+        "results, mentioning the sources.\n"
     )
     if RAG.has_documents:
         text += (

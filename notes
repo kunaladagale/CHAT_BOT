@@ -45,3 +45,5 @@ run this command - pip install langgraph-checkpoint-postgres "psycopg[binary]" p
 
 
 pip install yfinance requests langsmith
+
+pip install gTTS feedparser
